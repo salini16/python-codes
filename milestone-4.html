@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Air Quality Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+  <style>
+    body { background: #f8f9fa; }
+    .card { border-radius: 15px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+    .gauge { width: 250px; height: 250px; margin: auto; }
+  </style>
+</head>
+<body>
+<div class="container my-4">
+  <h2 class="text-center mb-4">🌍 Air Quality Dashboard</h2>
+  
+  <div class="row g-4">
+    <!-- AQI Gauge -->
+    <div class="col-md-4">
+      <div class="card p-3 text-center">
+        <h5>Current Air Quality</h5>
+        <canvas id="aqiGauge" class="gauge"></canvas>
+        <h4 class="mt-2" id="aqiValue">--</h4>
+      </div>
+    </div>
+    
+    <!-- Forecast Chart -->
+    <div class="col-md-8">
+      <div class="card p-3">
+        <h5>PM2.5 Forecast</h5>
+        <canvas id="forecastChart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-4 mt-2">
+    <!-- Pollutant Trends -->
+    <div class="col-md-8">
+      <div class="card p-3">
+        <h5>Pollutant Trends</h5>
+        <canvas id="pollutantChart"></canvas>
+      </div>
+    </div>
+
+    <!-- Alerts -->
+    <div class="col-md-4">
+      <div class="card p-3">
+        <h5>Alert Notifications</h5>
+        <div id="alertBox" class="alert alert-info">Upload data to view alerts.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Upload CSV -->
+  <div class="row mt-4">
+    <div class="col text-center">
+      <input type="file" id="csvFile" accept=".csv" class="form-control">
+    </div>
+  </div>
+</div>
+
+<script>
+let aqiGaugeChart, forecastChart, pollutantChart;
+
+document.getElementById("csvFile").addEventListener("change", function(e){
+  const file = e.target.files[0];
+  Papa.parse(file, {
+    header: true,
+    dynamicTyping: true,
+    complete: function(results) {
+      renderDashboard(results.data);
+    }
+  });
+});
+
+function renderDashboard(data){
+  const labels = data.map(row => row.Date || "");
+  const pm25 = data.map(row => row["PM2.5"]);
+  const pm10 = data.map(row => row["PM10"]);
+  const o3 = data.map(row => row["O3"]);
+  const aqi = data.map(row => row["AQI"]);
+
+  const latestAQI = aqi[aqi.length-1] || 0;
+  document.getElementById("aqiValue").innerText = latestAQI;
+
+  // Alerts
+  let alertMsg = "", alertClass="";
+  let gaugeColor = "#28a745";
+  if(latestAQI <= 50){ alertMsg="Good air quality today."; alertClass="success"; gaugeColor="#28a745"; }
+  else if(latestAQI <= 100){ alertMsg="Moderate air quality expected."; alertClass="warning"; gaugeColor="#ffc107"; }
+  else if(latestAQI <= 200){ alertMsg="Unhealthy for sensitive groups."; alertClass="danger"; gaugeColor="#fd7e14"; }
+  else { alertMsg="Hazardous air quality! Stay indoors."; alertClass="dark"; gaugeColor="#dc3545"; }
+  document.getElementById("alertBox").className = "alert alert-" + alertClass;
+  document.getElementById("alertBox").innerText = alertMsg;
+
+  // Destroy old charts
+  if(aqiGaugeChart) aqiGaugeChart.destroy();
+  if(forecastChart) forecastChart.destroy();
+  if(pollutantChart) pollutantChart.destroy();
+
+  // AQI Gauge
+  aqiGaugeChart = new Chart(document.getElementById("aqiGauge"), {
+    type: 'doughnut',
+    data: {
+      labels: ['AQI','Remaining'],
+      datasets: [{
+        data: [latestAQI, 500-latestAQI],
+        backgroundColor: [gaugeColor,'#eaeaea'],
+        cutout: '70%'
+      }]
+    },
+    options: { plugins: { legend: { display: false } } }
+  });
+
+  // Forecast Chart (PM2.5)
+  forecastChart = new Chart(document.getElementById("forecastChart"), {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'PM2.5',
+        data: pm25,
+        borderColor: 'blue',
+        backgroundColor: 'rgba(0,0,255,0.1)',
+        fill: true,
+        tension: 0.4
+      }]
+    }
+  });
+
+  // Pollutant Trends
+  pollutantChart = new Chart(document.getElementById("pollutantChart"), {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [
+        { label: "PM2.5", data: pm25, borderColor: "red", backgroundColor:"rgba(255,0,0,0.1)", fill:true, tension: 0.4 },
+        { label: "PM10", data: pm10, borderColor: "green", backgroundColor:"rgba(0,255,0,0.1)", fill:true, tension: 0.4 },
+        { label: "O3", data: o3, borderColor: "orange", backgroundColor:"rgba(255,165,0,0.1)", fill:true, tension: 0.4 }
+      ]
+    }
+  });
+}
+</script>
+</body>
+</html>
