@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Air Quality Monitoring & Forecasting Dashboard</title>
+    <!-- Load Plotly.js for charts (used for the gauge, time series, and predictions) -->
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        /* Embedded CSS from user input, refined for dark theme and responsiveness */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1e1e1e; /* Darker background */
+            color: #e0e0e0; /* Light text */
+            margin: 0;
+            padding: 20px;
+            line-height: 1.6;
+        }
+
+        .dashboard-container {
+            max-width: 1300px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 25px;
+        }
+
+        .card {
+            background-color: #2a2a2a; /* Slightly lighter card background */
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 6px 15px rgba(0, 0, 0, 0.4);
+            transition: transform 0.3s ease;
+        }
+        
+        .card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.5);
+        }
+
+        h1 {
+            color: #61dafb; /* Accent color */
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+        }
+        
+        h2 {
+            color: #61dafb;
+            border-bottom: 2px solid #3c4048; /* Subtle separator */
+            padding-bottom: 10px;
+            margin-top: 0;
+            font-size: 1.5em;
+        }
+
+        /* Styling for input fields and buttons */
+        #upload-section label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+        }
+
+        input[type="file"], input[type="date"], button {
+            padding: 12px;
+            margin: 8px 0;
+            border-radius: 6px;
+            border: none;
+            font-size: 1em;
+            transition: all 0.3s ease;
+        }
+
+        input[type="file"], input[type="date"] {
+            background-color: #3c4048;
+            color: #ffffff;
+            border: 1px solid #61dafb;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        button {
+            cursor: pointer;
+            background-color: #61dafb;
+            color: #1e1e1e;
+            font-weight: bold;
+            box-shadow: 0 4px #4fa3d1;
+            width: 100%;
+        }
+
+        button:hover {
+            background-color: #4fa3d1;
+            box-shadow: 0 2px #3c7d9e;
+            transform: translateY(1px);
+        }
+
+        #upload-status {
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #3c4048;
+            border-radius: 4px;
+            color: #e0e0e0;
+        }
+
+        /* Styling for the AQI Value display */
+        #aqi-value {
+            font-size: 2.5em;
+            text-align: center;
+            margin-top: 15px;
+            font-weight: 700;
+            color: #e0e0e0; /* Will be dynamically colored in JS */
+        }
+        
+        /* Ensure chart containers adapt */
+        #aqi-gauge-chart, #pollutant-time-series, #prediction-chart {
+            min-height: 300px;
+            width: 100%;
+        }
+        
+        /* --- CSV Preview Table Styles --- */
+        #csv-table-output {
+            max-height: 450px; /* Limit height to enable scrolling */
+            overflow-y: auto;
+            border: 1px solid #3c4048;
+            border-radius: 8px;
+            background-color: #2e2e2e;
+        }
+        #csv-table-output table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85em;
+            text-align: center;
+            table-layout: fixed; /* Ensures column width consistency */
+        }
+        #csv-table-output th, #csv-table-output td {
+            padding: 12px 8px;
+            border-bottom: 1px solid #3c4048;
+            white-space: nowrap; 
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        #csv-table-output th {
+            background-color: #3c4048;
+            color: #61dafb;
+            font-weight: bold;
+            position: sticky; /* Sticky headers for scrolling */
+            top: 0;
+            z-index: 10;
+        }
+        #csv-table-output tr:nth-child(even) {
+            background-color: #282828;
+        }
+        #csv-table-output tr:hover {
+            background-color: #3a3a3a;
+        }
+
+
+        /* Grid layout for larger screens */
+        @media (min-width: 768px) {
+            .dashboard-container {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            /* Make key sections span two columns */
+            #upload-section, 
+            #pollutant-graphs-section, 
+            #prediction-section,
+            #csv-preview-section { /* Added the new section */
+                grid-column: span 2;
+            }
+            #aqi-gauge-section {
+                grid-column: span 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard-container">
+        <h1>Air Quality Monitoring & Forecasting</h1>
+
+        <!-- Section 1: Upload and Pollutants (Full Width) -->
+        <section id="upload-section" class="card">
+            <h2>AirAware - Upload CSV & Process Data</h2>
+            <div style="display: flex; gap: 15px; align-items: center;">
+                <input type="file" id="csv-upload" accept=".csv" style="flex-grow: 1;">
+                <button onclick="handleUpload()" style="width: auto;">Upload & Process</button>
+            </div>
+            <div id="upload-status">Awaiting file upload...</div>
+        </section>
+
+        <!-- Section 2: Current AQI Gauge (Half Width) -->
+        <section id="aqi-gauge-section" class="card">
+            <h2>Current Air Quality (AQI Gauge)</h2>
+            <div id="aqi-gauge-chart"></div>
+            <div id="aqi-value">Loading...</div>
+        </section>
+
+        <!-- Section 3: Pollutant Graphs (Historical - Full Width) -->
+        <section id="pollutant-graphs-section" class="card">
+            <h2>Pollutant Graphs (Historical)</h2>
+            <div id="pollutant-time-series"></div>
+        </section>
+
+        <!-- Section 4: Calendar-based Prediction (Full Width) -->
+        <section id="prediction-section" class="card">
+            <h2>Calendar-based Prediction</h2>
+            <div style="display: flex; gap: 15px; align-items: center;">
+                <label for="prediction-date" style="white-space: nowrap;">Select Date:</label>
+                <input type="date" id="prediction-date" style="width: auto; flex-grow: 1;">
+                <button onclick="getPrediction()" style="width: auto;">Get Predictions</button>
+            </div>
+            <div id="prediction-chart"></div>
+        </section>
+
+        <!-- Section 5: CSV Data Preview (Full Width) -->
+        <section id="csv-preview-section" class="card">
+            <h2>Uploaded Data Preview</h2>
+            <div id="csv-table-output">No data uploaded yet.</div>
+        </section>
+
+    </div>
+
+    <script>
+        // --- Core Application Logic (app.js equivalent) ---
+
+        // Utility to get AQI category and color
+        function getAqiColor(aqi) {
+            if (aqi <= 50) return { color: 'green', category: 'Good' };
+            if (aqi <= 100) return { color: 'yellow', category: 'Satisfactory' };
+            if (aqi <= 200) return { color: 'orange', category: 'Moderate' };
+            if (aqi <= 300) return { color: 'red', category: 'Poor' };
+            return { color: 'darkred', category: 'Severe' };
+        }
+
+        // Simulated Data (mimicking a backend response after upload)
+        const AQI_MOCK_DATA = 78;
+
+        const HISTORICAL_DATA_MOCK = [
+            { pollutant: 'PM2.5', values: [55, 60, 65, 70, 75, 80, 70, 60, 50, 40], dates: Array.from({length: 10}, (_, i) => `2025-10-${i+1}`) },
+            { pollutant: 'O3', values: [20, 25, 30, 35, 30, 25, 20, 15, 10, 5], dates: Array.from({length: 10}, (_, i) => `2025-10-${i+1}`) },
+            { pollutant: 'NO2', values: [30, 32, 35, 40, 45, 42, 38, 35, 30, 25], dates: Array.from({length: 10}, (_, i) => `2025-10-${i+1}`) },
+        ];
+
+        const PREDICTION_MOCK_DATA = [
+            { pollutant: 'PM2.5', level: 85, unit: 'µg/m³' },
+            { pollutant: 'O3', level: 32, unit: 'ppb' },
+            { pollutant: 'SO2', level: 15, unit: 'ppb' },
+            { pollutant: 'NO2', level: 45, unit: 'ppb' },
+            { pollutant: 'CO', level: 1.2, unit: 'ppm' },
+            { pollutant: 'NH3', level: 25, unit: 'µg/m³' },
+        ];
+        
+        const INITIAL_MOCK_CSV_CONTENT = `Date,Time,PM2.5,PM10,O3,NO2,SO2,CO,NH3
+2025-10-01,10:00,75.2,120.5,35.1,40.9,15.0,1.1,20.0
+2025-10-01,11:00,78.1,125.0,38.5,42.0,16.2,1.2,21.5
+2025-10-01,12:00,80.5,130.1,40.2,45.5,17.0,1.3,22.0
+2025-10-01,13:00,82.0,132.8,41.9,46.1,17.5,1.4,22.5
+2025-10-01,14:00,85.5,135.0,43.5,48.0,18.0,1.5,23.0
+2025-10-01,15:00,88.2,140.1,45.0,50.1,19.1,1.6,24.1
+2025-10-01,16:00,85.0,138.0,44.0,49.0,18.5,1.5,23.5
+2025-10-01,17:00,80.1,130.5,42.1,45.5,17.9,1.4,22.9
+2025-10-01,18:00,75.9,125.0,40.0,42.0,17.2,1.3,22.0
+2025-10-01,19:00,72.1,120.1,38.5,40.1,16.5,1.2,21.5
+2025-10-01,20:00,70.0,118.0,37.0,39.0,16.0,1.1,21.0
+2025-10-01,21:00,68.5,115.5,36.5,38.5,15.5,1.0,20.5
+2025-10-01,22:00,65.0,110.0,35.0,35.0,15.0,0.9,20.0
+2025-10-01,23:00,60.1,105.1,33.5,32.1,14.5,0.8,19.5`;
+
+
+        // Function to parse CSV string into an array of arrays
+        function parseCSV(csvString) {
+            const rows = csvString.trim().split('\n');
+            return rows.map(row => row.split(',').map(cell => cell.trim()));
+        }
+
+        // Function to render the array of data into an HTML table
+        function renderCsvTable(data, elementId) {
+            if (data.length === 0) {
+                document.getElementById(elementId).innerHTML = '<p style="text-align:center; padding: 20px;">The uploaded file is empty or could not be parsed.</p>';
+                return;
+            }
+
+            let tableHtml = '<table><thead><tr>';
+            const headers = data[0];
+            const bodyRows = data.slice(1);
+
+            // Create table headers
+            headers.forEach(header => {
+                tableHtml += `<th>${header}</th>`;
+            });
+            tableHtml += '</tr></thead><tbody>';
+
+            // Create table body rows
+            bodyRows.forEach(row => {
+                tableHtml += '<tr>';
+                row.forEach(cell => {
+                    tableHtml += `<td>${cell}</td>`;
+                });
+                tableHtml += '</tr>';
+            });
+
+            tableHtml += '</tbody></table>';
+            document.getElementById(elementId).innerHTML = tableHtml;
+        }
+
+        // 1. Handle CSV Upload (Actual file reading and display)
+        function handleUpload() {
+            const fileInput = document.getElementById('csv-upload');
+            const statusDiv = document.getElementById('upload-status');
+            const previewDiv = document.getElementById('csv-table-output');
+            
+            if (fileInput.files.length > 0) {
+                const file = fileInput.files[0];
+                const fileName = file.name;
+                statusDiv.textContent = `File ${fileName} selected. Processing data and updating dashboard...`;
+
+                const reader = new FileReader();
+                
+                reader.onload = (e) => {
+                    const csvContent = e.target.result;
+                    const parsedData = parseCSV(csvContent);
+                    
+                    // Display the table preview
+                    renderCsvTable(parsedData, 'csv-table-output');
+                    
+                    // --- SIMULATE DATA PROCESSING AND CHART UPDATE ---
+                    setTimeout(() => {
+                        renderAqiGauge(AQI_MOCK_DATA);
+                        renderPollutantTimeSeries(HISTORICAL_DATA_MOCK);
+                        statusDiv.textContent = `Data from ${fileName} loaded and dashboard charts updated. Current AQI: ${AQI_MOCK_DATA}`;
+                    }, 1500); // Shorter delay for better UX
+                };
+                
+                reader.onerror = () => {
+                    statusDiv.textContent = `Error reading file ${fileName}.`;
+                    previewDiv.innerHTML = '<p style="text-align:center; padding: 20px; color: red;">Failed to read file.</p>';
+                };
+
+                reader.readAsText(file);
+                
+            } else {
+                statusDiv.textContent = "Please select a CSV file to upload.";
+            }
+        }
+
+        // 2. Render AQI Gauge (Uses Plotly.js)
+        function renderAqiGauge(aqiValue) {
+            const { color, category } = getAqiColor(aqiValue);
+            
+            // Update the numerical AQI value display
+            const aqiValueDiv = document.getElementById('aqi-value');
+            aqiValueDiv.textContent = `${aqiValue} (${category})`;
+            aqiValueDiv.style.color = color;
+
+
+            const data = [
+                {
+                    type: 'indicator',
+                    mode: 'gauge+number+delta',
+                    value: aqiValue,
+                    domain: { x: [0, 1], y: [0, 1] },
+                    title: { text: `AQI: ${category}`, font: { size: 24, color: 'white' } },
+                    gauge: {
+                        axis: { range: [null, 300], tickwidth: 1, tickcolor: "white" },
+                        bar: { color: "#4fa3d1" }, // General bar color
+                        steps: [
+                            // AQI Range Definitions (based on Indian standard)
+                            { range: [0, 50], color: 'rgb(0, 153, 0)', name: 'Good' },
+                            { range: [50, 100], color: 'rgb(255, 255, 0)', name: 'Satisfactory' },
+                            { range: [100, 200], color: 'rgb(255, 128, 0)', name: 'Moderate' },
+                            { range: [200, 300], color: 'rgb(255, 0, 0)', name: 'Poor' },
+                            { range: [300, 500], color: 'rgb(128, 0, 128)', name: 'Severe' }
+                        ],
+                        threshold: {
+                            line: { color: "white", width: 4 },
+                            thickness: 0.8,
+                            value: aqiValue
+                        }
+                    }
+                }
+            ];
+
+            const layout = {
+                margin: { t: 20, b: 20, l: 20, r: 20 },
+                height: 350,
+                paper_bgcolor: "#2a2a2a", /* Card background */
+                font: { color: "white", family: "Inter" },
+                responsive: true 
+            };
+
+            Plotly.newPlot('aqi-gauge-chart', data, layout, {displayModeBar: false});
+        }
+
+        // 3. Render Pollutant Time Series Graph (Uses Plotly.js)
+        function renderPollutantTimeSeries(historicalData) {
+            // Colors for pollutants for visual distinction
+            const pollutantColors = {
+                'PM2.5': '#ff7f0e', // Orange
+                'O3': '#2ca02c', // Green
+                'NO2': '#d62728', // Red
+                'SO2': '#9467bd', // Purple
+                'CO': '#8c564b', // Brown
+                'NH3': '#e377c2' // Pink
+            };
+
+            const traces = historicalData.map(pollutantData => ({
+                x: pollutantData.dates,
+                y: pollutantData.values,
+                mode: 'lines+markers',
+                name: pollutantData.pollutant,
+                line: { color: pollutantColors[pollutantData.pollutant] || '#61dafb', width: 2 },
+                marker: { size: 6 }
+            }));
+
+            const layout = {
+                title: 'All Pollutants: Concentration Trend Over Time',
+                xaxis: { 
+                    title: 'Date', 
+                    showgrid: true, 
+                    gridcolor: '#444',
+                    tickfont: { color: 'white' },
+                    automargin: true 
+                },
+                yaxis: { 
+                    title: 'Concentration Level', 
+                    showgrid: true, 
+                    gridcolor: '#444',
+                    tickfont: { color: 'white' },
+                    automargin: true 
+                },
+                plot_bgcolor: "#3c4048", /* Plot area background */
+                paper_bgcolor: "#2a2a2a", /* Card background */
+                legend: { font: { color: 'white' }, orientation: "h", y: 1.02, yanchor: "bottom" },
+                font: { color: "white", family: "Inter" },
+                margin: { t: 50, b: 50, l: 60, r: 20 },
+                responsive: true
+            };
+
+            Plotly.newPlot('pollutant-time-series', traces, layout);
+        }
+
+        // 4. Get Prediction (Simulated)
+        function getPrediction() {
+            const dateInput = document.getElementById('prediction-date');
+            
+            if (!dateInput.value) {
+                document.getElementById('prediction-chart').innerHTML = '<p style="text-align:center; color:orange;">Please select a date for prediction.</p>';
+                return;
+            }
+            
+            const selectedDate = dateInput.value;
+            document.getElementById('prediction-chart').innerHTML = `<p style="text-align:center; color:#61dafb;">Fetching prediction for ${selectedDate}...</p>`;
+
+            // Simulate API call delay
+            setTimeout(() => {
+                renderPredictionBarChart(PREDICTION_MOCK_DATA, selectedDate);
+            }, 1200);
+        }
+
+        // 5. Render Prediction Bar Chart (Uses Plotly.js)
+        function renderPredictionBarChart(predictionData, date) {
+            const pollutantNames = predictionData.map(p => p.pollutant);
+            const levels = predictionData.map(p => p.level);
+            const units = predictionData.map(p => p.unit);
+            
+            // Determine bar color based on concentration level (simplified)
+            const colors = levels.map(level => {
+                const aqi = level * 1.5; // Simple mock conversion to AQI influence
+                return getAqiColor(aqi).color;
+            });
+
+            const trace = {
+                x: pollutantNames,
+                y: levels,
+                type: 'bar',
+                marker: { color: colors },
+                hovertemplate: '<b>%{x}</b>: %{y} ' + units[0] + '<extra></extra>',
+            };
+
+            const layout = {
+                title: `Predicted Pollutant Levels on ${date}`,
+                xaxis: { 
+                    title: 'Pollutant', 
+                    tickfont: { color: 'white' },
+                    automargin: true
+                },
+                yaxis: { 
+                    title: 'Predicted Concentration Level', 
+                    tickfont: { color: 'white' },
+                    automargin: true 
+                },
+                plot_bgcolor: "#3c4048",
+                paper_bgcolor: "#2a2a2a",
+                font: { color: "white", family: "Inter" },
+                margin: { t: 50, b: 50, l: 60, r: 20 },
+                responsive: true
+            };
+
+            Plotly.newPlot('prediction-chart', [trace], layout);
+        }
+
+        // Initialize the dashboard on load
+        document.addEventListener('DOMContentLoaded', () => {
+            // Initial render of charts with mock data
+            renderAqiGauge(AQI_MOCK_DATA);
+            renderPollutantTimeSeries(HISTORICAL_DATA_MOCK);
+            
+            // Render the initial mock CSV table
+            const mockDataArray = parseCSV(INITIAL_MOCK_CSV_CONTENT);
+            renderCsvTable(mockDataArray, 'csv-table-output');
+
+            // Set a default date for the picker (tomorrow)
+            const tomorrow = new Date();
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            const defaultDate = tomorrow.toISOString().split('T')[0];
+            document.getElementById('prediction-date').value = defaultDate;
+
+            // Render an initial prediction chart placeholder
+            document.getElementById('prediction-chart').innerHTML = '<p style="text-align:center; padding: 50px; color:#e0e0e0;">Select a date and click "Get Predictions" to see the forecast.</p>';
+        });
+
+        // Ensure charts resize when the window resizes
+        window.onresize = function() {
+            Plotly.Plots.resize('aqi-gauge-chart');
+            Plotly.Plots.resize('pollutant-time-series');
+            Plotly.Plots.resize('prediction-chart');
+        };
+    </script>
+</body>
+</html>
