@@ -1,0 +1,462 @@
+# app.py
+"""
+Single-file Flask web app for "Our Voice, Our Rights" MGNREGA dashboard (Uttar Pradesh).
+Features:
+- Single-file frontend + backend (Flask).
+- Uses SQLite as on-disk cache to survive API downtime / rate limits.
+- Attempts to call data.gov.in API if you provide an API key via env var DATA_GOV_API_KEY.
+  If no API key is provided (or API fails), uses embedded sample data so the app still works.
+- Low-literacy friendly UI: large text/buttons, icons, infographic-style cards, simple Hindi/English labels.
+- Geolocation bonus: tries to detect user's location via browser geolocation and reverse-geocode via Nominatim
+  (if accessible) to suggest the nearest district. Falls back to manual selection.
+- Designed for one large state (Uttar Pradesh). You can change STATE_CODE to another supported state code.
+- To run:
+    1. pip install flask requests
+    2. python app.py
+    3. Open http://127.0.0.1:5000/ in your browser.
+
+Note: For production (hosting on a VM), run behind gunicorn/uvicorn, put secrets in env vars, and use a proper database.
+"""
+
+from flask import Flask, request, jsonify, render_template_string, g
+import requests, os, time, sqlite3, json
+from datetime import datetime, timedelta
+
+# ---------- Configuration ----------
+APP_PORT = int(os.environ.get("PORT", 5000))
+STATE_NAME = "Uttar Pradesh"
+STATE_CODE = "UP"   # used for label only; if you wire real API, adjust accordingly
+CACHE_DB = "cache.db"
+CACHE_TTL_SECONDS = 60 * 60 * 24  # 24 hours caching
+DATA_GOV_API_KEY = os.environ.get("DATA_GOV_API_KEY", "")  # optional; if you have one, set it
+# Replace RESOURCE_ID with actual resource id if you have it.
+# Example API pattern (uncomment and adapt if you know the exact endpoint):
+# DATA_GOV_RESOURCE_ID = "your-resource-id-here"
+# API_ENDPOINT_TEMPLATE = "https://api.data.gov.in/resource/{rid}?format=json&filters[state_name]={state}&limit=100&api-key={key}"
+API_ENDPOINT_TEMPLATE = ""  # leave empty -> app will use sample data
+
+# ---------- Sample fallback data (keeps app functional without API) ----------
+# Minimal sample monthly timeseries for a couple of districts in Uttar Pradesh.
+SAMPLE_DISTRICTS = [
+    {"district_id": "284", "district_name": "Lucknow"},
+    {"district_id": "285", "district_name": "Kanpur Nagar"},
+    {"district_id": "300", "district_name": "Varanasi"},
+    {"district_id": "290", "district_name": "Prayagraj"},
+]
+
+# sample timeseries: last 6 months
+def make_sample_timeseries(district_name):
+    base = {
+        "district": district_name,
+        "timeseries": []
+    }
+    today = datetime.utcnow()
+    for i in range(6, 0, -1):
+        month_dt = (today.replace(day=1) - timedelta(days=30 * (i - 1)))
+        mon_label = month_dt.strftime("%Y-%m")
+        # generate plausible sample numbers varying by district
+        seed = sum([ord(c) for c in district_name]) % 50
+        persons = 50000 + seed * 1000 + (i * 2000)
+        workdays = 120000 + seed * 800 + (i * 1500)
+        wages = round(persons * 150.5 + i * 1000)
+        base["timeseries"].append({
+            "month": mon_label,
+            "persons": persons,
+            "workdays": workdays,
+            "expenditure": wages
+        })
+    return base
+
+# ---------- Simple SQLite cache ----------
+def get_db():
+    db = getattr(g, "_database", None)
+    if db is None:
+        db = g._database = sqlite3.connect(CACHE_DB)
+        db.execute("""CREATE TABLE IF NOT EXISTS cache (
+                        key TEXT PRIMARY KEY,
+                        response TEXT,
+                        timestamp INTEGER
+                      )""")
+        db.commit()
+    return db
+
+def cache_get(key):
+    db = get_db()
+    cur = db.execute("SELECT response, timestamp FROM cache WHERE key=?", (key,))
+    row = cur.fetchone()
+    if not row:
+        return None
+    response, ts = row
+    age = time.time() - ts
+    if age > CACHE_TTL_SECONDS:
+        return None
+    return json.loads(response)
+
+def cache_set(key, value):
+    db = get_db()
+    db.execute("REPLACE INTO cache (key, response, timestamp) VALUES (?, ?, ?)",
+               (key, json.dumps(value), int(time.time())))
+    db.commit()
+
+# ---------- API fetch logic (uses cache, falls back to sample) ----------
+def fetch_mgnrega_for_district(district_id, months=6):
+    """
+    Attempt to fetch real data from official API if configured.
+    If not available or fails, return sample data.
+    The returned structure:
+    {
+        "district": "Name",
+        "timeseries": [ {"month":"YYYY-MM", "persons":int, "workdays":int, "expenditure":int}, ... ]
+    }
+    """
+    cache_key = f"mgnrega:{district_id}:{months}"
+    cached = cache_get(cache_key)
+    if cached:
+        return {"source": "cache", "data": cached}
+
+    # If an API endpoint template is configured and API key provided, try calling it.
+    if API_ENDPOINT_TEMPLATE and DATA_GOV_API_KEY:
+        # You must adapt API_ENDPOINT_TEMPLATE above for the real resource; placeholder logic here.
+        url = API_ENDPOINT_TEMPLATE.format(rid=DATA_GOV_API_KEY, state=STATE_NAME, key=DATA_GOV_API_KEY)
+        try:
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            payload = resp.json()
+            # Transform payload into our timeseries schema.
+            # NOTE: this part depends on actual API response format. Here we assume a list called 'records'.
+            records = payload.get("records", [])
+            # Filter records for district_id and recent months, then build timeseries (this transform is illustrative)
+            times = []
+            for r in records:
+                if str(r.get("district_id")) == str(district_id):
+                    times.append({
+                        "month": r.get("month", "")[:7],
+                        "persons": int(r.get("persons", 0)),
+                        "workdays": int(r.get("workdays", 0)),
+                        "expenditure": int(float(r.get("expenditure", 0)))
+                    })
+            times = sorted(times, key=lambda x: x["month"])[-months:]
+            data = {"district": records[0].get("district_name", "Unknown") if records else district_id, "timeseries": times}
+            cache_set(cache_key, data)
+            return {"source": "api", "data": data}
+        except Exception as e:
+            # fall through to sample
+            print("API fetch failed:", e)
+
+    # FALLBACK: sample data
+    # find sample district by id, else generate generic
+    dname = None
+    for d in SAMPLE_DISTRICTS:
+        if d["district_id"] == str(district_id) or d["district_name"].lower() == str(district_id).lower():
+            dname = d["district_name"]
+            break
+    if not dname:
+        # default to first sample
+        dname = SAMPLE_DISTRICTS[0]["district_name"]
+    data = make_sample_timeseries(dname)
+    cache_set(cache_key, data)
+    return {"source": "sample", "data": data}
+
+def fetch_district_list():
+    """Return list of districts for chosen STATE_NAME. Uses cache or sample set."""
+    cache_key = f"districts:{STATE_CODE}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+    # If the real API is available, you would hit it here to fetch district list.
+    # For now return SAMPLE_DISTRICTS.
+    cache_set(cache_key, SAMPLE_DISTRICTS)
+    return SAMPLE_DISTRICTS
+
+# ---------- Flask app ----------
+app = Flask(__name__)
+
+@app.teardown_appcontext
+def close_connection(exception):
+    db = getattr(g, "_database", None)
+    if db is not None:
+        db.close()
+
+# Front page - serves the whole single-page UI
+@app.route("/")
+def index():
+    # Inline template with simple, large-buttoned UI and JS to call backend endpoints.
+    template = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Our Voice, Our Rights — MGNREGA ({{ state_name }})</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 12px; background: #f7f9fc; color: #1b1b1b; }
+    header { text-align: center; padding: 12px 6px; }
+    h1 { margin: 6px 0; font-size: 20px; }
+    .sub { color: #555; font-size: 13px; margin-bottom: 12px; }
+    .big { font-size: 22px; font-weight: bold; }
+    .flex { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .card { background:white; border-radius:10px; padding: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.06); }
+    .selector { width:100%; max-width:520px; margin: 0 auto 12px; display:flex; gap:8px; }
+    select, button { font-size:18px; padding:10px; border-radius:8px; border:1px solid #d3d8df; }
+    button.primary { background:#0b6df0; color:white; border:none; }
+    .cards-grid { display:grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-top:12px; }
+    .metric { text-align:center; padding:16px; }
+    .metric .num { font-size:20px; font-weight:700; }
+    .hint { font-size:13px; color:#666; margin-top:8px; text-align:center; }
+    #chartContainer { margin-top:16px; padding:12px; }
+    .lang { margin-left:8px; }
+    footer { margin-top:18px; text-align:center; color:#777; font-size:12px; }
+    .badge { font-size:12px; padding:6px 8px; border-radius:8px; background:#eef6ff; color:#064e9a; display:inline-block; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="card">
+      <div class="big">हमारी आवाज, हमारे अधिकार</div>
+      <div class="sub">MGNREGA की जानकारी आसान भाषा में — {{ state_name }}</div>
+      <div style="display:flex;gap:8px;justify-content:center;align-items:center;">
+        <div class="badge" id="sourceBadge">source: local</div>
+        <div class="hint" id="lastUpdated" style="margin-left:12px;"></div>
+      </div>
+    </div>
+  </header>
+
+  <div class="card" style="margin-top:12px;">
+    <div class="selector">
+      <select id="districtSelect" aria-label="Choose district">
+        <option value="">Loading districts...</option>
+      </select>
+      <select id="monthCountSelect" title="Months to show" aria-label="Months">
+        <option value="3">Last 3 months</option>
+        <option selected value="6">Last 6 months</option>
+        <option value="12">Last 12 months</option>
+      </select>
+      <button id="goBtn" class="primary">देखें / View</button>
+    </div>
+    <div style="text-align:center;"><button id="detectBtn">Use my location (देकर देखें)</button></div>
+  </div>
+
+  <div id="mainContent">
+    <div class="cards-grid" id="metrics"></div>
+    <div id="chartContainer" class="card">
+      <canvas id="timeseriesChart" width="800" height="300"></canvas>
+    </div>
+  </div>
+
+  <footer>
+    <div>Designed for low literacy: icons, big numbers, and Hindi labels. Data is cached to handle API downtime.</div>
+  </footer>
+
+<script>
+const stateName = "{{ state_name }}";
+async function loadDistricts(){
+  const sel = document.getElementById('districtSelect');
+  sel.disabled = true;
+  sel.innerHTML = '<option>Loading...</option>';
+  try{
+    const r = await fetch('/api/districts');
+    const d = await r.json();
+    sel.innerHTML = '<option value="">-- Select district / जिला चुनें --</option>';
+    d.forEach(x=>{
+      const opt = document.createElement('option');
+      opt.value = x.district_id || x.district_name;
+      opt.text = x.district_name + " ";
+      sel.appendChild(opt);
+    });
+    sel.disabled = false;
+  }catch(e){
+    sel.innerHTML = '<option>Error loading</option>';
+    console.error(e);
+  }
+}
+
+function niceNumber(n){
+  if(n===null||n===undefined) return '-';
+  return n.toLocaleString('en-IN');
+}
+
+let chart = null;
+function renderData(payload){
+  const data = payload.data;
+  document.getElementById('sourceBadge').textContent = 'source: ' + payload.source;
+  document.getElementById('lastUpdated').textContent = 'Data for ' + data.district + ' (' + data.timeseries.length + ' months)';
+  // aggregate latest month numbers
+  const latest = data.timeseries[data.timeseries.length-1] || {};
+  const prev = data.timeseries[data.timeseries.length-2] || {};
+  const metrics = [
+    {label: "कितने लाभार्थी / Persons", key: "persons", val: latest.persons, prev: prev.persons},
+    {label: "कुल दिन काम / Workdays", key: "workdays", val: latest.workdays, prev: prev.workdays},
+    {label: "खर्च (₹) / Expenditure", key: "expenditure", val: latest.expenditure, prev: prev.expenditure}
+  ];
+  const mdiv = document.getElementById('metrics');
+  mdiv.innerHTML = '';
+  metrics.forEach(m=>{
+    const card = document.createElement('div');
+    card.className = 'card metric';
+    const p = document.createElement('div');
+    p.className = 'num';
+    p.textContent = niceNumber(m.val);
+    const lab = document.createElement('div');
+    lab.textContent = m.label;
+    lab.style.marginTop = '8px';
+    const delta = document.createElement('div');
+    const diff = (m.val || 0) - (m.prev || 0);
+    const sign = diff > 0 ? '↑' : (diff < 0 ? '↓' : '→');
+    delta.textContent = sign + ' ' + (diff===0 ? '-' : niceNumber(Math.abs(diff)));
+    delta.style.marginTop = '6px';
+    delta.style.color = diff>0 ? 'green' : (diff<0 ? 'crimson' : '#666');
+    card.appendChild(p); card.appendChild(lab); card.appendChild(delta);
+    mdiv.appendChild(card);
+  });
+
+  // Chart
+  const labels = data.timeseries.map(t => t.month);
+  const seriesPersons = data.timeseries.map(t => t.persons);
+  const seriesWorkdays = data.timeseries.map(t => t.workdays);
+  const seriesExp = data.timeseries.map(t => t.expenditure);
+  if(chart) chart.destroy();
+  const ctx = document.getElementById('timeseriesChart').getContext('2d');
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [
+        { label: 'Persons', data: seriesPersons, fill:false, tension:0.2, borderWidth:2 },
+        { label: 'Workdays', data: seriesWorkdays, fill:false, tension:0.2, borderWidth:2 },
+        { label: 'Expenditure', data: seriesExp, fill:false, tension:0.2, borderWidth:2 }
+      ]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { position: 'top' } },
+      scales: {
+        y: { beginAtZero: true }
+      }
+    }
+  });
+}
+
+async function loadAndRender(districtId, months){
+  if(!districtId) return alert("Please select district / कृपया जिला चुनें");
+  document.getElementById('goBtn').disabled = true;
+  try{
+    const r = await fetch(`/api/district_data?district=${encodeURIComponent(districtId)}&months=${months}`);
+    const j = await r.json();
+    if(j.error){
+      alert("Error: " + j.error);
+      return;
+    }
+    renderData(j);
+  }catch(e){
+    alert("Failed to load data");
+    console.error(e);
+  }finally{
+    document.getElementById('goBtn').disabled = false;
+  }
+}
+
+document.getElementById('goBtn').addEventListener('click', ()=>{
+  const district = document.getElementById('districtSelect').value;
+  const months = document.getElementById('monthCountSelect').value;
+  loadAndRender(district, months);
+});
+
+// Geolocation and reverse geocode to pick nearest district
+document.getElementById('detectBtn').addEventListener('click', async ()=>{
+  if(!navigator.geolocation) return alert("Geolocation not supported");
+  document.getElementById('detectBtn').disabled = true;
+  navigator.geolocation.getCurrentPosition(async (pos)=>{
+    const lat = pos.coords.latitude;
+    const lon = pos.coords.longitude;
+    try{
+      // call backend reverse geocode endpoint which uses Nominatim
+      const r = await fetch(`/api/reverse_geocode?lat=${lat}&lon=${lon}`);
+      const j = await r.json();
+      if(j && j.district_id){
+        document.getElementById('districtSelect').value = j.district_id;
+        // auto fetch
+        const months = document.getElementById('monthCountSelect').value;
+        loadAndRender(j.district_id, months);
+      } else {
+        alert("Unable to detect district. Please select manually.");
+      }
+    }catch(e){
+      console.error(e);
+      alert("Location detection failed.");
+    } finally {
+      document.getElementById('detectBtn').disabled = false;
+    }
+  }, (err)=>{
+    alert("Location permission denied or failed.");
+    document.getElementById('detectBtn').disabled = false;
+  }, {timeout:10000});
+});
+
+window.addEventListener('load', loadDistricts);
+</script>
+</body>
+</html>
+"""
+    return render_template_string(template, state_name=STATE_NAME)
+
+# Endpoint: list of districts (state-specific)
+@app.route("/api/districts")
+def api_districts():
+    dlist = fetch_district_list()
+    return jsonify(dlist)
+
+# Endpoint: district data timeseries
+@app.route("/api/district_data")
+def api_district_data():
+    district = request.args.get("district", "")
+    months = int(request.args.get("months", "6"))
+    if not district:
+        return jsonify({"error": "missing district parameter"}), 400
+    # fetch data using our internal function
+    try:
+        res = fetch_mgnrega_for_district(district, months)
+        return jsonify(res)
+    except Exception as e:
+        return jsonify({"error": "internal error", "details": str(e)}), 500
+
+# Endpoint: reverse geocode lat/lon to nearest sample district (best-effort)
+@app.route("/api/reverse_geocode")
+def api_reverse_geocode():
+    lat = request.args.get("lat")
+    lon = request.args.get("lon")
+    if not lat or not lon:
+        return jsonify({"error": "provide lat and lon"}), 400
+    # Try to call Nominatim OpenStreetMap reverse geocode (no API key)
+    try:
+        nom_url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=10&addressdetails=1"
+        hdrs = {"User-Agent": "OurVoiceOurRightsApp/1.0 (email@example.com)"}
+        r = requests.get(nom_url, headers=hdrs, timeout=6)
+        r.raise_for_status()
+        j = r.json()
+        address = j.get("address", {})
+        # Look for district or county fields in address
+        district_name = address.get("county") or address.get("state_district") or address.get("city_district") or address.get("region") or address.get("town")
+        if not district_name:
+            # sometimes village/town present
+            district_name = address.get("town") or address.get("village") or address.get("city")
+        # try to match to our sample district list by substring
+        for d in fetch_district_list():
+            if d["district_name"].lower().split()[0] in (district_name or "").lower():
+                return jsonify({"district_id": d["district_id"], "district_name": d["district_name"], "matched_from": district_name})
+        # fuzzy fallback: return first district
+        d = fetch_district_list()[0]
+        return jsonify({"district_id": d["district_id"], "district_name": d["district_name"], "matched_from": district_name})
+    except Exception as e:
+        # If nominatim fails, just return first sample district (graceful degradation)
+        d = fetch_district_list()[0]
+        return jsonify({"district_id": d["district_id"], "district_name": d["district_name"], "note": "reverse geocode failed, fallback used", "error": str(e)})
+
+if __name__ == "__main__":
+    # create DB file if not exists
+    get_db()
+    print(f"Starting app for {STATE_NAME} on port {APP_PORT} ...")
+    app.run(host="0.0.0.0", port=APP_PORT, debug=True)
+```0
+
